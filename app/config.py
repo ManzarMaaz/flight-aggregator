@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 print("\n🔧 [CONFIG] Loading environment variables...")
 
+
 class Settings(BaseSettings):
     # Amadeus API
     AMADEUS_API_KEY: str
@@ -23,9 +24,11 @@ class Settings(BaseSettings):
     MY_MAIL: str
     MY_PASS: str
     SMTP_SERVER: str
-    
+
+    REDIS_URL: str
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
 
 settings = Settings()
 print("✅ [CONFIG] Environment variables loaded successfully.\n")
