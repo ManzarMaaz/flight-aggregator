@@ -1,3 +1,4 @@
+
 # ✈️ Distributed Flight Aggregator
 
 ### Async Flight Tracking • AI Policy Engine • RAG Assistant • Distributed Task Processing
@@ -26,6 +27,10 @@
 </div>
 
 ---
+
+<p align="center">
+  <img src="assets/banner.png" alt="Distributed Flight Aggregator Banner" width="100%">
+</p>
 
 # ⚡ Overview
 
