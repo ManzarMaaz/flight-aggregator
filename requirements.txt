@@ -1,15 +1,30 @@
+# --- Core Backend ---
 fastapi
 uvicorn
 python-dotenv
 httpx
 pydantic
+pydantic-settings
+
+# --- Database ---
+sqlalchemy
+alembic
+psycopg2-binary
+
+# --- Background Workers ---
+celery
+redis
+
+# --- Testing ---
 pytest
 pytest-asyncio
 requests
-sqlalchemy
-alembic
+
+# --- Third Party ---
 twilio
-pydantic-settings
-psycopg2-binary
-celery
-redis
+
+# 🚀 --- AI/RAG LAYER --- 🚀
+llama-index
+llama-index-vector-stores-postgres
+llama-index-llms-google-genai
+llama-index-embeddings-google-genai

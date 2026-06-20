@@ -1,18 +1,49 @@
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta
 
 import httpx
+import redis
+from dotenv import load_dotenv
+from google import genai
+from llama_index.core import Settings, VectorStoreIndex
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.vector_stores.postgres import PGVectorStore
+from sqlalchemy import make_url
 
 from app import crud
 from app.celery_app import celery_app
 from app.config import settings
 from app.database import SessionLocal
 from app.notifications import NotificationManager
+from app.schemas import FlightChatRequest, FlightDealVerdict
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+REDIS_HOST = os.getenv("REDIS_HOST", "flight_redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+
+redis_client = redis.Redis(
+    host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True
+)
 
 
 class AmadeusService:
+    """
+    Service class to interact with the Amadeus API for flight-related operations,
+    including authentication, IATA lookup, and searching for flight deals.
+    """
+
     def __init__(self):
-        print("🔧 [SERVICE] Initializing AmadeusService...")
+        """Initializes the Amadeus service with configuration settings."""
         self.api_key = settings.AMADEUS_API_KEY
         self.api_secret = settings.AMADEUS_API_SECRET
         self.token_endpoint = settings.TOKEN_ENDPOINT
@@ -21,10 +52,9 @@ class AmadeusService:
 
         self.city_endpoint = settings.CITY_SEARCH_ENDPOINT
         self.flight_endpoint = settings.FLIGHT_ENDPOINT
-        print("✅ [SERVICE] AmadeusService initialized.")
 
     async def get_access_token(self):
-        print("🔐 [SERVICE] Requesting Amadeus access token...")
+        """Retrieves a new OAuth access token for Amadeus API authentication."""
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data = {
             "grant_type": "client_credentials",
@@ -38,7 +68,6 @@ class AmadeusService:
                     url=self.token_endpoint, headers=headers, data=data
                 )
                 response.raise_for_status()
-                print("✅ [SERVICE] Token acquired successfully.")
                 token_data = response.json()
                 self.access_token = token_data.get("access_token")
                 return self.access_token
@@ -50,10 +79,7 @@ class AmadeusService:
                 return None
 
     async def get_iata_code(self, city_name: str):
-        """
-        Searches for the 3-letter IATA code for a given city name.
-        """
-        print(f"\n🔍 [SERVICE] Searching IATA code for: {city_name}")
+        """Searches for the 3-letter IATA code for a given city name."""
         if not self.access_token:
             await self.get_access_token()
 
@@ -68,10 +94,7 @@ class AmadeusService:
                 response.raise_for_status()
                 data = response.json().get("data", [])
                 if data and "iataCode" in data[0]:
-                    iata_code = data[0]["iataCode"]
-                    print(f"✅ [SERVICE] IATA code found for {city_name}: {iata_code}")
-                    return iata_code
-                print(f"❌ [SERVICE] No IATA code found for {city_name}")
+                    return data[0]["iataCode"]
                 return None
 
             except httpx.HTTPError as e:
@@ -93,10 +116,6 @@ class AmadeusService:
             tuple or None: A tuple (price_str, stops_count) if a flight is found,
                            or None if no flight is found.
         """
-        flight_type = "Direct" if is_direct else "Indirect"
-        print(
-            f"\n✈️  [SERVICE] Searching {flight_type} flights: {origin_code} → {destination_code} ({departure_date} to {arrival_date})"
-        )
         if not self.access_token:
             await self.get_access_token()
 
@@ -124,16 +143,8 @@ class AmadeusService:
                 if result.get("data") and len(result["data"]) > 0:
                     flight_data = result["data"][0]
                     total_price = flight_data["price"]["grandTotal"]
-
-                    # Number of stops = (Number of segments) - 1
                     stops = len(flight_data["itineraries"][0]["segments"]) - 1
-                    print(
-                        f"✅ [SERVICE] {flight_type} flight found: ₹{total_price} with {stops} stop(s)"
-                    )
                     return total_price, stops
-                print(
-                    f"❌ [SERVICE] No {flight_type} flights found for {destination_code}"
-                )
                 return None
 
             except httpx.HTTPError as e:
@@ -144,29 +155,23 @@ class AmadeusService:
 async def track_flights_deals(
     origin: str, days_in_advance: int, search_windows_days: int
 ):
-    print("\n\n🚀 [BACKGROUND_TASK] Flight tracking started")
-    print(f"   Origin: {origin}")
-    print(f"   Days in advance: {days_in_advance}")
-    print(f"   Search window: {search_windows_days} days")
-
+    """
+    Background task logic to track and notify about flight deals.
+    """
     amadeus_service = AmadeusService()
     notification_manager = NotificationManager()
 
     departure_date = datetime.now() + timedelta(days=days_in_advance)
     arrival_date = departure_date + timedelta(days=search_windows_days)
-    print(f"   Departure: {departure_date.date()}, Arrival: {arrival_date.date()}\n")
 
     db = SessionLocal()
 
     try:
-        print("📄 [BACKGROUND_TASK] Fetching destinations from database...")
         destinations = crud.get_active_destinations(db)
         results = []
 
-        for idx, dest in enumerate(destinations, 1):
-            print(f"\n[{idx}/{len(destinations)}] Processing {dest.city_name}...")
+        for dest in destinations:
             if not dest.iata_code:
-                print(f"   ❌ Skipping {dest.city_name}: Missing IATA code.")
                 continue
 
             flight_result = await amadeus_service.check_flights(
@@ -179,7 +184,6 @@ async def track_flights_deals(
 
             if flight_result:
                 price, stops = flight_result
-                print(f"   Price: ₹{price}, Target: ₹{dest.target_price}")
 
                 if float(price) < dest.target_price:
                     results.append(
@@ -191,11 +195,6 @@ async def track_flights_deals(
                             "stops": stops,
                         }
                     )
-                    print(
-                        f"   🌟 DEAL FOUND for {dest.city_name}! Price: ₹{price} (Target: ₹{dest.target_price})"
-                    )
-
-                    # Send notifications
                     message_body = f"Flight deal alert! {dest.city_name} ({dest.iata_code}) is now ₹{price}, below your target of ₹{dest.target_price}."
                     notification_manager.send_email(
                         subject="Flight Deal Alert!",
@@ -204,32 +203,150 @@ async def track_flights_deals(
                     )
                     notification_manager.send_sms(message_body)
 
-                else:
-                    print("   ℹ️  Price above target. No alert.")
-            else:
-                print("   ❌ No flights found.")
-
-            print("   ⏳ Sleeping for 2 seconds to respect Amadeus API limits...")
             await asyncio.sleep(2)
-
-        print(
-            f"\n\n✅ [BACKGROUND_TASK] Flight tracking completed. Found {len(results)} deal(s).\n"
-        )
         return results
     finally:
         db.close()
-        print("[BACKGROUND_TASK] Database connection closed.")
 
 
 @celery_app.task(name="app.services.celery_track_flights")
 def celery_track_flights(origin: str, days_in_advance: int, search_windows_days: int):
-    print("\n\n🚀 [CELERY_TASK] Starting flight tracking task...")
-
+    """
+    Celery task wrapper for triggering flight deal tracking.
+    """
     results = asyncio.run(
         track_flights_deals(origin, days_in_advance, search_windows_days)
     )
-
-    print(
-        f"✅ [CELERY_TASK] Flight tracking task completed. Found {len(results)} deal(s)."
-    )
     return results
+
+
+@celery_app.task
+def analyze_flight_deal_task(origin: str, destination: str, price: int):
+    """
+    Analyzes flight deal using structured Gemini output to prevent JSON hallucinations.
+    """
+    cache_key = (
+        f"flight_deal:{origin.strip().lower()}:{destination.strip().lower()}:{price}"
+    )
+
+    # 1. Define the Pydantic model for the schema
+    # (Assuming FlightDealVerdict is already defined in schemas.py as the target structure)
+
+    # 2. Call Gemini with response_schema
+    try:
+        prompt = f"Analyze this deal: Origin: {origin}, Destination: {destination}, Price: {price}"
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            generation_config=genai.types.GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=FlightDealVerdict,
+            ),
+        )
+
+        # 3. Parse result
+        verdict = FlightDealVerdict.model_validate_json(response.text)
+
+        # 4. Cache and return
+        redis_client.setex(cache_key, 86400, verdict.model_dump_json())
+        return verdict.model_dump()
+
+    except Exception as e:
+        print(f"[Worker] AI Pipeline Error: {e}")
+        return {"error": "AI failed to return the guaranteed schema."}
+
+
+def process_flight_chat(request: FlightChatRequest):
+    """
+    Handles multi-turn chat interactions to gather flight search requirements.
+    """
+    system_prompt = """You are a helpful flight deal assistant.
+    Your goal is to gather exactly 3 pieces of information from the user:
+    1. Origin City
+    2. Destination City
+    3. Target Price Budget
+
+    RULES:
+    - If you are missing ANY of these 3 pieces of information, ask the user for them.
+    - If you have ALL 3 pieces, output ONLY a raw JSON object matching this exact schema:
+      {"origin_iata": "JFK", "destination_iata": "LHR", "is_good_deal": true, "reasoning": "..."}
+    """
+
+    formatted_history = []
+    formatted_history.append({"role": "user", "parts": [system_prompt]})
+    formatted_history.append(
+        {"role": "model", "parts": ["Understood. I will follow the rules."]}
+    )
+
+    for turn in request.chat_history:
+        formatted_history.append({"role": turn.role, "parts": [turn.text]})
+
+    formatted_history.append({"role": "user", "parts": [request.new_message]})
+
+    try:
+        # Assuming you want to use the 'client' initialized at module level
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",  # Changed model to a standard one
+            contents=formatted_history,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+            ),
+        )
+
+        raw_text = response.text.strip()
+
+        if raw_text.startswith("{") and raw_text.endswith("}"):
+            try:
+                parsed_json = json.loads(raw_text)
+                return {"type": "analysis_complete", "data": parsed_json}
+            except json.JSONDecodeError:
+                return {"type": "chat_response", "text": raw_text}
+        else:
+            return {"type": "chat_response", "text": raw_text}
+
+    except Exception as e:
+        print(f"[API] Gemini Chat Error: {e}")
+        return {
+            "type": "error",
+            "message": "The AI encountered an error processing your request.",
+        }
+
+
+class RAGService:
+    _query_engine = None
+
+    @classmethod
+    def initialize(cls):
+        """Called once during FastAPI startup."""
+        print("[System] Booting up RAG Engine...")
+        # TODO: Setup Settings.llm and Settings.embed_model
+        Settings.llm = GoogleGenAI(
+            model="gemini-2.5-flash-lite", api_key=os.getenv("GEMINI_API_KEY")
+        )
+        Settings.embed_model = GoogleGenAIEmbedding(
+            model_name="gemini-embedding-2", api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        url = make_url(DATABASE_URL)
+        vector_store = PGVectorStore.from_params(
+            database=url.database,
+            host=url.host,
+            password=url.password,
+            port=url.port,
+            user=url.username,
+            table_name="data_flight_policy",
+            embed_dim=3072,
+        )
+
+        index = VectorStoreIndex.from_vector_store(vector_store)
+
+        cls._query_engine = index.as_query_engine(similarity_top_k=3)
+
+    @classmethod
+    async def ask_policy(cls, question: str):
+        """Called by the router on every request."""
+        if cls._query_engine is None:
+            raise ValueError("RAG Engine not initialized")
+
+        return cls._query_engine.query(question)

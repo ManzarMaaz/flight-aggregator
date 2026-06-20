@@ -1,19 +1,17 @@
-version: '3.8'
-
 services:
-  # 1. The Database
-  db:
-    image: postgres:15-alpine
+  # 1. The Database (PGVector)
+  flight_postgres:
+    image: pgvector/pgvector:pg15
     container_name: flight_postgres
     restart: always
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
       POSTGRES_DB: flight_db
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
 
   # 2. The Message Broker (Redis)
   redis:
@@ -28,13 +26,16 @@ services:
     container_name: flight_fastapi
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
-      - .:/app  # Maps your local code so changes update live
+      - .:/app
     ports:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@flight_postgres:5432/flight_db
+      - REDIS_HOST=flight_redis
     depends_on:
-      - db
+      - flight_postgres
       - redis
 
   # 4. The Muscle (Celery Worker)
@@ -46,8 +47,11 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@flight_postgres:5432/flight_db
+      - REDIS_HOST=flight_redis
     depends_on:
-      - db
+      - flight_postgres
       - redis
 
   # 5. The Brain/Scheduler (Celery Beat)
@@ -59,9 +63,14 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@flight_postgres:5432/flight_db
+      - REDIS_HOST=flight_redis
     depends_on:
-      - db
+      - flight_postgres
       - redis
 
+# Top-level volume declaration belongs at the very bottom
 volumes:
-  postgres_data:
+  pgdata:
+    driver: local

@@ -12,12 +12,14 @@ router = APIRouter(
 
 @router.post("/", response_model=schemas.UserResponse)
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    print("\n🚀 [ENDPOINT] POST /api/v1/users/ - User registration started")
-    print(f"   Email: {user.email}")
+    """
+    Registers a new user in the system, preventing duplicate email addresses.
+    """
+    print(f"INFO: Registration requested for {user.email}.")
     db_user = crud.get_user_by_email(db, email=user.email)
     if db_user:
-        print("❌ [ENDPOINT] Registration failed: Email already exists\n")
+        print(f"WARN: Registration failed: {user.email} already exists.")
         raise HTTPException(status_code=400, detail="Email already registered")
     result = crud.create_user(db=db, user=user)
-    print("✅ [ENDPOINT] User registration completed successfully\n")
+    print(f"INFO: User {user.email} registered successfully.")
     return result

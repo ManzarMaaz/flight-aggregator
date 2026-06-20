@@ -1,14 +1,16 @@
-# flight_data.py
 from dataclasses import dataclass
+
 
 @dataclass
 class FlightData:
     """
-    A simple data model representing a potential flight deal found in the sheet.
+    A model representing the essential details of a potential flight,
+    including target price goals and actual search results.
     """
+
     city_name: str
     iata_code: str
     target_price: float
-    cheapest_price: float = None  # To be filled after the flight search API call
+    cheapest_price: float = None
     row_id: int = None
     stops: int = 0
